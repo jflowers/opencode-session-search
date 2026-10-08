@@ -242,4 +242,4 @@ const plugin: Plugin = async (ctx) => ({
   },
 })
 
-export default { server: plugin } satisfies PluginModule
+export default { id: "session-search", server: plugin } satisfies PluginModule
