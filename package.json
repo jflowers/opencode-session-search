@@ -35,8 +35,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@opencode-ai/plugin": "latest",
-    "@opencode-ai/sdk": "latest"
+    "@opencode-ai/plugin": "1.19.0",
+    "@opencode-ai/sdk": "1.19.0"
   },
   "devDependencies": {
     "@types/bun": "^1.4.3",
