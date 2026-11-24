@@ -29,5 +29,8 @@ jobs:
         run: bun install --frozen-lockfile
       - name: Typecheck
         run: bun run typecheck
+      # No opencode database on the runner: live-db tests skip themselves.
+      - name: Test
+        run: bun test
       - name: Package contents
         run: npm pack --dry-run --ignore-scripts
