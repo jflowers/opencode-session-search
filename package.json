@@ -1,9 +1,38 @@
 {
-  "name": "@jflowers/opencode-session-search",
+  "name": "opencode-session-searcher",
   "version": "0.1.0",
+  "description": "opencode plugin: search past opencode sessions (search_sessions)",
   "type": "module",
+  "main": "./src/index.ts",
   "exports": {
+    ".": "./src/index.ts",
     "./server": "./src/index.ts"
+  },
+  "files": [
+    "src/",
+    "README.md",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jflowers/opencode-session-search.git"
+  },
+  "homepage": "https://github.com/jflowers/opencode-session-search#readme",
+  "bugs": {
+    "url": "https://github.com/jflowers/opencode-session-search/issues"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin"
+  ],
+  "engines": {
+    "opencode": ">=1.19.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@opencode-ai/plugin": "latest",
