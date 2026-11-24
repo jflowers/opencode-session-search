@@ -1,0 +1,48 @@
+name: Publish
+
+# Publishes opencode-session-searcher to npm, run from main with the version tag:
+#   gh workflow run publish.yml -f tag=v0.2.0
+# The pipeline is jflowers/ship's shared npm-release.yml: org-infra's
+# preflight (semver, tag uniqueness, CI on HEAD, unreleased commits) creates
+# the tag, then the tag is checked out, package.json's version must equal
+# it, the checks below run, the package is published with provenance (a
+# personal-account package isn't staged), and the GitHub release is created
+# with generated notes. A version already on npm is skipped, so a re-run is
+# safe.
+#
+# Auth: npm trusted publishing (OIDC), no token. npm checks the calling
+# workflow, so npmjs.com trusts this repository and this file (publish.yml),
+# not ship's. Renaming this file breaks publishing until the trusted
+# publisher on npmjs.com is updated to match.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag; package.json's version must match (e.g. v0.2.0)
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Release
+    uses: jflowers/ship/.github/workflows/npm-release.yml@79b475c2892604eaa941f43322b8948626e43ab8 # v0.4.0
+    with:
+      tag: ${{ inputs.tag }}
+      ci_checks: '["typecheck and test"]'
+      node_version: "24"
+      bun_version: 1.4.4
+      install: bun install --frozen-lockfile
+      # The package ships its TypeScript source; nothing is built.
+      checks: |
+        bun run typecheck
+        npm pack --dry-run --ignore-scripts
+    permissions:
+      contents: write
+      checks: read
+      id-token: write
