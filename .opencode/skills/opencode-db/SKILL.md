@@ -30,6 +30,8 @@ Prefer the db_* tools over the older `search_sessions`/`list_sessions` (API-base
 
 ## Search strategy: narrow before scanning
 
+Queries match **all words**: `db_search("auth login")` finds parts (or titles) containing both `auth` and `login`, in any order. Wrap a phrase in double quotes to match it exactly: `"connection refused" retry`. Each extra word narrows the results; it doesn't widen them.
+
 1. `db_search(query, scope="titles")` — instant title lookup.
 2. Narrow by project/directory/date via `db_query` (indexed, ms).
 3. `db_search(query, session_id=..., scope="session")` — ms.

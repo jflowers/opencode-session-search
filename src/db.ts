@@ -71,6 +71,8 @@ export type SearchMatch = {
 export type SearchResult = {
   scope: SearchScope
   term: string
+  /** The words that all had to match (a quoted phrase is one word). */
+  words: string[]
   matches: SearchMatch[]
   truncated: boolean
   elapsedMs: number
@@ -325,27 +327,47 @@ export function readSession(
   }
 }
 
+/**
+ * Split a search query into the words that must all match.
+ * Whitespace separates words; a double-quoted phrase stays one word.
+ * Lowercased and de-duplicated.
+ */
+export function splitSearchTerms(query: string): string[] {
+  const words: string[] = []
+  for (const m of query.matchAll(/"([^"]*)"|(\S+)/g)) {
+    const word = (m[1] ?? m[2] ?? "").trim().toLowerCase()
+    if (word && !words.includes(word)) words.push(word)
+  }
+  return words
+}
+
+function likePattern(word: string): string {
+  return `%${word.replace(/[\\%_]/g, (c) => `\\${c}`)}%`
+}
+
 export function searchSessions(
   term: string,
   opts: { sessionId?: string; scope?: SearchScope; limit?: number } = {},
 ): SearchResult {
   const needle = term.trim()
-  if (!needle) throw new Error("query must be a non-empty search term")
+  const words = splitSearchTerms(needle)
+  if (words.length === 0) throw new Error("query must be a non-empty search term")
   const scope: SearchScope = opts.scope ?? (opts.sessionId ? "session" : "global")
   if (scope === "session" && !opts.sessionId) {
     throw new Error('scope "session" requires a session_id')
   }
   const limit = clamp(opts.limit, 1, 200, 25)
-  const pattern = `%${needle.replace(/[\\%_]/g, (c) => `\\${c}`)}%`
+  const patterns = words.map(likePattern)
+  const allLike = (column: string) => words.map(() => `${column} LIKE ? ESCAPE '\\'`).join(" AND ")
   const db = openDB()
   const started = performance.now()
   try {
     if (scope === "titles") {
       const rows = db
         .prepare(
-          "SELECT id, title, directory, agent, time_created FROM session WHERE title LIKE ? ESCAPE '\\' ORDER BY time_updated DESC LIMIT ?",
+          `SELECT id, title, directory, agent, time_created FROM session WHERE ${allLike("title")} ORDER BY time_updated DESC LIMIT ?`,
         )
-        .all(pattern, limit + 1) as any[]
+        .all(...patterns, limit + 1) as any[]
       const truncated = rows.length > limit
       if (truncated) rows.pop()
       const matches: SearchMatch[] = rows.map((r) => ({
@@ -359,7 +381,7 @@ export function searchSessions(
         type: null,
         snippet: null,
       }))
-      return { scope, term: needle, matches, truncated, elapsedMs: Math.round(performance.now() - started) }
+      return { scope, term: needle, words, matches, truncated, elapsedMs: Math.round(performance.now() - started) }
     }
     const order = scope === "session" ? "ASC" : "DESC"
     const sessionFilter = scope === "session" ? "AND p.session_id = ? " : ""
@@ -372,10 +394,13 @@ export function searchSessions(
       `FROM part p ` +
       `JOIN message m ON m.id = p.message_id ` +
       `JOIN session s ON s.id = p.session_id ` +
-      `WHERE p.data LIKE ? ESCAPE '\\' ${sessionFilter}` +
+      `WHERE ${allLike("p.data")} ${sessionFilter}` +
       `ORDER BY p.time_created ${order} LIMIT ?`
+    // The snippet is centred on the first word.
     const params: unknown[] =
-      scope === "session" ? [needle, pattern, opts.sessionId, limit + 1] : [needle, pattern, limit + 1]
+      scope === "session"
+        ? [words[0], ...patterns, opts.sessionId, limit + 1]
+        : [words[0], ...patterns, limit + 1]
     const rows = db.prepare(sql).all(...(params as any[])) as any[]
     const truncated = rows.length > limit
     if (truncated) rows.pop()
@@ -390,7 +415,7 @@ export function searchSessions(
       type: r.type ?? null,
       snippet: r.snippet ?? null,
     }))
-    return { scope, term: needle, matches, truncated, elapsedMs: Math.round(performance.now() - started) }
+    return { scope, term: needle, words, matches, truncated, elapsedMs: Math.round(performance.now() - started) }
   } finally {
     db.close()
   }
