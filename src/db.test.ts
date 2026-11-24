@@ -3,7 +3,16 @@ import { existsSync } from "node:fs"
 import { Database } from "bun:sqlite"
 import { homedir } from "node:os"
 import { join } from "node:path"
-import { dbPath, openDB, query, readSession, resolveDbPath, searchSessions, validateSql } from "./db"
+import {
+  dbPath,
+  openDB,
+  query,
+  readSession,
+  resolveDbPath,
+  searchSessions,
+  splitSearchTerms,
+  validateSql,
+} from "./db"
 
 const dbExists = existsSync(dbPath())
 
@@ -168,5 +177,56 @@ describe("resolveDbPath", () => {
     expect(resolveDbPath({ env: { OPENCODE_DB_PATH: "  " }, opencodeDbPath: () => "/cli/opencode.db" })).toBe(
       "/cli/opencode.db",
     )
+  })
+})
+
+describe("splitSearchTerms", () => {
+  test("splits on whitespace and lowercases", () => {
+    expect(splitSearchTerms("  Auth   LOGIN\tflow ")).toEqual(["auth", "login", "flow"])
+  })
+
+  test("keeps a double-quoted phrase as one word", () => {
+    expect(splitSearchTerms('"Connection refused" retry')).toEqual(["connection refused", "retry"])
+  })
+
+  test("drops duplicates and empty quotes", () => {
+    expect(splitSearchTerms('auth AUTH "" auth')).toEqual(["auth"])
+  })
+
+  test("returns nothing for blank input", () => {
+    expect(splitSearchTerms('   ""  ')).toEqual([])
+  })
+})
+
+describe("searchSessions all-words matching", () => {
+  test.skipIf(!dbExists)("every title match contains every word, in any order", () => {
+    const found = query(
+      "SELECT title FROM session WHERE title LIKE '% %' AND length(title) > 10 ORDER BY time_updated DESC LIMIT 1",
+    )
+    if (found.rows.length === 0) return
+    const titleWords = String(found.rows[0].title).toLowerCase().split(/\s+/).filter(Boolean)
+    const reversed = [titleWords[titleWords.length - 1], titleWords[0]].join(" ")
+    const result = searchSessions(reversed, { scope: "titles", limit: 50 })
+    expect(result.words).toEqual(splitSearchTerms(reversed))
+    expect(result.matches.length).toBeGreaterThan(0)
+    for (const m of result.matches) {
+      const title = String(m.title).toLowerCase()
+      for (const w of result.words) expect(title).toContain(w)
+    }
+  })
+
+  test.skipIf(!dbExists)("session scope requires every word in the same part", () => {
+    const found = query(
+      "SELECT p.session_id AS id FROM part p WHERE json_extract(p.data, '$.type') = 'text' LIMIT 1",
+    )
+    const sessionId = found.rows[0].id as string
+    const result = searchSessions("e a", { scope: "session", sessionId, limit: 20 })
+    expect(result.words).toEqual(["e", "a"])
+    const impossible = searchSessions("e zzqqxx-no-such-word-9f3", { scope: "session", sessionId, limit: 20 })
+    expect(impossible.matches).toEqual([])
+  })
+
+  test("rejects a query of only empty quotes", () => {
+    expect(() => searchSessions('""')).toThrow(/non-empty/)
   })
 })

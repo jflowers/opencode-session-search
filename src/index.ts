@@ -60,13 +60,14 @@ function extractPartTexts(part: any, depth: Depth): string[] {
   return texts
 }
 
-function buildSnippet(text: string, query: string): string | null {
+/** Every word must appear in the text; the snippet is centred on the first one. */
+function buildSnippet(text: string, words: string[]): string | null {
   const lower = text.toLowerCase()
-  const idx = lower.indexOf(query)
-  if (idx === -1) return null
+  if (!words.every((w) => lower.includes(w))) return null
+  const idx = lower.indexOf(words[0])
 
   const start = Math.max(0, idx - SNIPPET_RADIUS)
-  const end = Math.min(text.length, idx + query.length + SNIPPET_RADIUS)
+  const end = Math.min(text.length, idx + words[0].length + SNIPPET_RADIUS)
   let snippet = text.slice(start, end).replace(/\n/g, " ")
   if (start > 0) snippet = "..." + snippet
   if (end < text.length) snippet = snippet + "..."
@@ -76,7 +77,7 @@ function buildSnippet(text: string, query: string): string | null {
 async function scanSession(
   client: any,
   sessionID: string,
-  query: string,
+  words: string[],
   depth: Depth,
 ): Promise<Match[]> {
   const matches: Match[] = []
@@ -92,7 +93,7 @@ async function scanSession(
       for (const part of entry.parts ?? []) {
         const texts = extractPartTexts(part, depth)
         for (const text of texts) {
-          const snippet = buildSnippet(text, query)
+          const snippet = buildSnippet(text, words)
           if (snippet) {
             matches.push({ role, snippet, timestamp })
           }
@@ -251,7 +252,7 @@ function formatDbSessionRead(result: db.ReadSessionResult): string {
 
 function formatDbSearch(result: db.SearchResult): string {
   const header =
-    `Scope: ${result.scope} | Term: "${result.term}" | ` +
+    `Scope: ${result.scope} | Words (all must match): ${result.words.map((w) => JSON.stringify(w)).join(" ")} | ` +
     `${result.matches.length} match${result.matches.length === 1 ? "" : "es"} in ${result.elapsedMs} ms` +
     (result.truncated ? " (capped at limit)" : "")
   if (result.matches.length === 0) return `${header}\n\nNo matches found.`
@@ -302,7 +303,12 @@ const plugin: Plugin = async (ctx) => ({
         "Pass session_id or session_ids to target specific sessions. " +
         "Pass parent_session_id to search only child sessions of a parent.",
       args: {
-        query: tool.schema.string().describe("Search term (case-insensitive substring match)"),
+        query: tool.schema
+          .string()
+          .describe(
+            "Words to search for (case-insensitive). Every word must appear in the same part; " +
+              'wrap a phrase in double quotes to match it exactly, e.g. "connection refused" retry',
+          ),
         session_id: tool.schema
           .string()
           .optional()
@@ -346,7 +352,8 @@ const plugin: Plugin = async (ctx) => ({
           .describe("Max sessions to scan (default: 20)"),
       },
       async execute(args) {
-        const query = args.query.toLowerCase()
+        const words = db.splitSearchTerms(args.query)
+        if (words.length === 0) throw new Error("query must be a non-empty search term")
         const depth: Depth = args.depth ?? "conversation"
         const limit = args.limit ?? 5
         const maxSessions = args.max_sessions ?? 20
@@ -377,7 +384,7 @@ const plugin: Plugin = async (ctx) => ({
         const results: SessionResult[] = []
 
         for (const session of sessions) {
-          const matches = await scanSession(ctx.client, session.id, query, depth)
+          const matches = await scanSession(ctx.client, session.id, words, depth)
           if (matches.length > 0) {
             results.push({
               sessionID: session.id,
@@ -535,14 +542,19 @@ const plugin: Plugin = async (ctx) => ({
 
     db_search: tool({
       description:
-        "Substring search over session content, tiered by scope. " +
+        "Search session content, tiered by scope; every word in the query must appear in the same part (or title). " +
         '"titles": session titles only — instant. ' +
         '"session": every part of one session — milliseconds (requires session_id). ' +
         '"global": every part of every session — full table scan, typically 10–30 seconds; narrow first (titles, project, session) when possible. ' +
         'Default scope: "session" when session_id is given, otherwise "global". ' +
         "Matches conversation text, reasoning, and tool inputs/outputs. Returns snippets with session titles and roles.",
       args: {
-        query: tool.schema.string().describe("Search term (case-insensitive substring; % and _ match literally)"),
+        query: tool.schema
+          .string()
+          .describe(
+            "Words to search for (case-insensitive; % and _ match literally). Every word must appear in the same part " +
+              '(or title); wrap a phrase in double quotes to match it exactly, e.g. "connection refused" retry',
+          ),
         session_id: tool.schema
           .string()
           .optional()
