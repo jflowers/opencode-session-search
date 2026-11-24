@@ -9,7 +9,7 @@ metadata:
 
 opencode stores all sessions, messages, and parts in a single SQLite database:
 
-- Path: `${XDG_DATA_HOME ?? ~/.local/share}/opencode/opencode.db`
+- Path, first that applies: `$OPENCODE_DB_PATH`, then `opencode db path`, then `${XDG_DATA_HOME ?? ~/.local/share}/opencode/opencode.db`
 - ~14 GB, WAL mode, actively written by the running opencode server
 - Scale (2026-10): ~5,400 sessions, 460 projects, 127K messages, 559K parts
 
@@ -40,11 +40,11 @@ Prefer the db_* tools over the older `search_sessions`/`list_sessions` (API-base
 Use when you need `jq`/`rg` composition, streaming, or the db_* tools are not loaded (no restart needed — unlike plugin changes):
 
 ```bash
-sqlite3 -readonly "file:$HOME/.local/share/opencode/opencode.db?mode=ro" \
+sqlite3 -readonly "file:$(opencode db path)?mode=ro" \
   "SELECT ... ;" 
 ```
 
-Or interactively: `sqlite3 -readonly ~/.local/share/opencode/opencode.db`
+Or interactively: `sqlite3 -readonly "$(opencode db path)"`
 
 Rules:
 - Always `mode=ro` (URI) or `-readonly` (flag).

@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test"
 import { existsSync } from "node:fs"
 import { Database } from "bun:sqlite"
-import { dbPath, openDB, query, readSession, searchSessions, validateSql } from "./db"
+import { homedir } from "node:os"
+import { join } from "node:path"
+import { dbPath, openDB, query, readSession, resolveDbPath, searchSessions, validateSql } from "./db"
 
 const dbExists = existsSync(dbPath())
 
@@ -131,5 +133,40 @@ describe("searchSessions", () => {
 
   test("rejects empty search terms", () => {
     expect(() => searchSessions("   ")).toThrow(/non-empty/)
+  })
+})
+
+describe("resolveDbPath", () => {
+  const failingCli = () => null
+
+  test("OPENCODE_DB_PATH wins over everything", () => {
+    const path = resolveDbPath({
+      env: { OPENCODE_DB_PATH: "/env/opencode.db", XDG_DATA_HOME: "/xdg" },
+      opencodeDbPath: () => "/cli/opencode.db",
+    })
+    expect(path).toBe("/env/opencode.db")
+  })
+
+  test("uses `opencode db path` when the env var is unset", () => {
+    const path = resolveDbPath({ env: { XDG_DATA_HOME: "/xdg" }, opencodeDbPath: () => "/cli/opencode.db" })
+    expect(path).toBe("/cli/opencode.db")
+  })
+
+  test("falls back to XDG_DATA_HOME when the CLI fails", () => {
+    expect(resolveDbPath({ env: { XDG_DATA_HOME: "/xdg" }, opencodeDbPath: failingCli })).toBe(
+      "/xdg/opencode/opencode.db",
+    )
+  })
+
+  test("falls back to ~/.local/share when nothing else is set", () => {
+    expect(resolveDbPath({ env: {}, opencodeDbPath: failingCli })).toBe(
+      join(homedir(), ".local", "share", "opencode", "opencode.db"),
+    )
+  })
+
+  test("ignores a blank OPENCODE_DB_PATH", () => {
+    expect(resolveDbPath({ env: { OPENCODE_DB_PATH: "  " }, opencodeDbPath: () => "/cli/opencode.db" })).toBe(
+      "/cli/opencode.db",
+    )
   })
 })

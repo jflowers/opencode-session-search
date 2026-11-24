@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite"
+import { spawnSync } from "node:child_process"
 import { existsSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
@@ -75,9 +76,48 @@ export type SearchResult = {
   elapsedMs: number
 }
 
-export function dbPath(): string {
-  const dataHome = process.env.XDG_DATA_HOME ?? join(homedir(), ".local", "share")
+export type DbPathSources = {
+  env?: Record<string, string | undefined>
+  /** Runs `opencode db path`; returns its trimmed stdout, or null when it fails. */
+  opencodeDbPath?: () => string | null
+}
+
+function runOpencodeDbPath(): string | null {
+  try {
+    const result = spawnSync("opencode", ["db", "path"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 5000,
+    })
+    if (result.status !== 0) return null
+    return (result.stdout ?? "").trim() || null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Resolve the database path, in order:
+ * 1. `OPENCODE_DB_PATH`
+ * 2. `opencode db path` (opencode's own answer)
+ * 3. `${XDG_DATA_HOME ?? ~/.local/share}/opencode/opencode.db`
+ */
+export function resolveDbPath(sources: DbPathSources = {}): string {
+  const env = sources.env ?? process.env
+  const fromEnv = env.OPENCODE_DB_PATH?.trim()
+  if (fromEnv) return fromEnv
+  const fromCli = (sources.opencodeDbPath ?? runOpencodeDbPath)()
+  if (fromCli) return fromCli
+  const dataHome = env.XDG_DATA_HOME || join(homedir(), ".local", "share")
   return join(dataHome, "opencode", "opencode.db")
+}
+
+let cachedPath: string | undefined
+
+/** The resolved database path, looked up once per process. */
+export function dbPath(): string {
+  cachedPath ??= resolveDbPath()
+  return cachedPath
 }
 
 export function openDB(): Database {
