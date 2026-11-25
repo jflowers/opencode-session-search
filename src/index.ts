@@ -1,6 +1,7 @@
 import type { Plugin, PluginModule } from "@opencode-ai/plugin"
 import { tool } from "@opencode-ai/plugin/tool"
 import * as db from "./db"
+import { formatNextSteps, rankSessions } from "./next-steps"
 import { registerSkills } from "./skills"
 
 type Depth = "conversation" | "tool" | "both"
@@ -205,6 +206,10 @@ function formatResults(results: SessionResult[]): string {
     lines.push("")
   }
 
+  // Results are already one per session, sorted by match count.
+  lines.push(
+    ...formatNextSteps(results.map((r) => ({ id: r.sessionID, title: r.title, matches: r.matches.length }))),
+  )
   return lines.join("\n")
 }
 
@@ -251,6 +256,10 @@ function formatDbSessionRead(result: db.ReadSessionResult): string {
   return lines.join("\n")
 }
 
+function titleText(title: db.SqlValue): string | null {
+  return title === null ? null : String(title)
+}
+
 function formatDbSearch(result: db.SearchResult): string {
   const header =
     `Scope: ${result.scope} | Words (all must match): ${result.words.map((w) => JSON.stringify(w)).join(" ")} | ` +
@@ -269,6 +278,14 @@ function formatDbSearch(result: db.SearchResult): string {
       if (m.snippet) lines.push(`  ${String(m.snippet).replace(/\s+/g, " ").trim()}`)
     }
   }
+  lines.push(
+    "",
+    ...formatNextSteps(
+      result.scope === "titles"
+        ? result.matches.map((m) => ({ id: m.sessionId, title: titleText(m.title), matches: null }))
+        : rankSessions(result.matches.map((m) => ({ sessionId: m.sessionId, title: titleText(m.title) }))),
+    ),
+  )
   return lines.join("\n")
 }
 
