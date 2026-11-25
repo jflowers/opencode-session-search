@@ -1,6 +1,7 @@
 import type { Plugin, PluginModule } from "@opencode-ai/plugin"
 import { tool } from "@opencode-ai/plugin/tool"
 import * as db from "./db"
+import { registerSkills } from "./skills"
 
 type Depth = "conversation" | "tool" | "both"
 
@@ -293,6 +294,7 @@ function formatSessionList(sessions: SessionMeta[]): string {
 }
 
 const plugin: Plugin = async (ctx) => ({
+  config: async (config) => registerSkills(config),
   tool: {
     search_sessions: tool({
       description:
