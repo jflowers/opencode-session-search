@@ -1,6 +1,6 @@
 {
   "name": "opencode-session-searcher",
-  "version": "0.2.0",
+  "version": "0.0.0-development",
   "description": "opencode plugin: search past opencode sessions (search_sessions)",
   "type": "module",
   "main": "./src/index.ts",

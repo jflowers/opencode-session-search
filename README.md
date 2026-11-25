@@ -20,9 +20,9 @@ Releases go through [`jflowers/ship`](https://github.com/jflowers/ship)'s shared
 npm workflow, the same one the other opencode plugins use, so the pipeline
 is fixed in one place. To release:
 
-1. Commit the version bump to `main` (`package.json`), and wait for CI.
-2. Dispatch the Publish workflow with the matching tag (don't push tags
-   yourself):
+1. Make sure CI passed on `main`. There is no version bump: `package.json`
+   holds `0.0.0-development`, and the release sets the version from the tag.
+2. Dispatch the Publish workflow with the tag (don't push tags yourself):
 
    ```bash
    gh workflow run publish.yml -f tag=vX.Y.Z
