@@ -230,8 +230,13 @@ function formatDbModel(model: db.SqlValue): string | null {
 
 function formatDbSessionRead(result: db.ReadSessionResult): string {
   const s = result.session
-  const lines: string[] = [`## ${s.title ?? "Untitled"}`, `Session: ${s.id}`]
+  const lines: string[] = [`## ${s.title ?? "Untitled"}`, `Session: ${s.id}${s.slug ? ` (${s.slug})` : ""}`]
   if (s.directory) lines.push(`Directory: ${s.directory}`)
+  if (s.projectName || s.projectWorktree) {
+    const name = s.projectName ? String(s.projectName) : null
+    const worktree = s.projectWorktree ? String(s.projectWorktree) : null
+    lines.push(`Project: ${[name, worktree && worktree !== name ? worktree : null].filter(Boolean).join(" — ")}`)
+  }
   const idents: string[] = []
   if (s.agent) idents.push(`Agent: ${s.agent}`)
   const model = formatDbModel(s.model)
@@ -241,7 +246,10 @@ function formatDbSessionRead(result: db.ReadSessionResult): string {
   if (s.cost !== null) {
     lines.push(`Cost: $${Number(s.cost).toFixed(4)} | Tokens in/out: ${s.tokensInput ?? 0}/${s.tokensOutput ?? 0}`)
   }
-  lines.push(`Parts: ${result.parts.length}${result.truncated ? " (truncated — raise limit for more)" : ""}`)
+  lines.push(
+    `Parts: ${result.parts.length}${result.order === "desc" ? ", newest first" : ""}` +
+      (result.truncated ? " (truncated — raise limit for more)" : ""),
+  )
   lines.push("")
   for (const part of result.parts) {
     const time = new Date(part.timeCreated).toISOString().slice(11, 19)
@@ -261,14 +269,39 @@ function titleText(title: db.SqlValue): string | null {
 }
 
 function formatDbSearch(result: db.SearchResult): string {
+  const count = result.sessions
+    ? `${result.sessions.length} session${result.sessions.length === 1 ? "" : "s"}`
+    : `${result.matches.length} match${result.matches.length === 1 ? "" : "es"}`
   const header =
     `Scope: ${result.scope} | Words (all must match): ${result.words.map((w) => JSON.stringify(w)).join(" ")} | ` +
-    `${result.matches.length} match${result.matches.length === 1 ? "" : "es"} in ${result.elapsedMs} ms` +
+    `${count} in ${result.elapsedMs} ms` +
     (result.truncated ? " (capped at limit)" : "")
-  if (result.matches.length === 0) return `${header}\n\nNo matches found.`
+  if (result.matches.length === 0 && !result.sessions?.length) return `${header}\n\nNo matches found.`
   const lines: string[] = [header, ""]
+  const when = (ms: number) => new Date(ms).toISOString().slice(0, 16).replace("T", " ")
+  const snippetLine = (m: db.SearchMatch, indent: string) =>
+    `${indent}${when(m.timeCreated)} [${m.role ?? "?"}/${m.type ?? "?"}] ${String(m.snippet ?? "").replace(/\s+/g, " ").trim()}`
+
+  if (result.sessions) {
+    for (const h of result.sessions) {
+      lines.push(
+        `## ${h.title ?? "Untitled"} — ${h.sessionId}`,
+        `${h.matchCount} match${h.matchCount === 1 ? "" : "es"}, last ${when(h.lastMatch)}` +
+          (h.directory ? ` | ${h.directory}` : ""),
+      )
+      for (const m of h.snippets) lines.push(snippetLine(m, "- "))
+      lines.push("")
+    }
+    lines.push(
+      ...formatNextSteps(
+        result.sessions.map((h) => ({ id: h.sessionId, title: titleText(h.title), matches: h.matchCount })),
+      ),
+    )
+    return lines.join("\n")
+  }
+
   for (const m of result.matches) {
-    const date = new Date(m.timeCreated).toISOString().slice(0, 16).replace("T", " ")
+    const date = when(m.timeCreated)
     if (result.scope === "titles") {
       lines.push(`## ${m.title ?? "Untitled"} (${date}) — ${m.sessionId}`)
       if (m.directory) lines.push(`Directory: ${m.directory}`)
@@ -521,7 +554,8 @@ const plugin: Plugin = async (ctx) => ({
 
     db_read_session: tool({
       description:
-        "Read a session's conversation directly from the database: every part of every message in chronological order, " +
+        "Read a session's conversation directly from the database: every part of every message in chronological order " +
+          '(or newest first with order "desc"), skipping empty text, ' +
         "rendered as readable text with roles and part types. " +
         'Defaults to text + reasoning parts; include "tool" for tool calls with their outputs, "step-start" for step boundaries. ' +
         "Completes in milliseconds regardless of session size. Use to recall exactly what happened in a past session.",
@@ -539,12 +573,17 @@ const plugin: Plugin = async (ctx) => ({
           .number()
           .optional()
           .describe("Max characters per part, truncated with a marker (default: 600, max: 8000)"),
+        order: tool.schema
+          .enum(["asc", "desc"])
+          .optional()
+          .describe('"asc" (default): oldest first. "desc": newest first, so limit keeps the latest parts.'),
       },
       async execute(args) {
         const result = db.readSession(args.session_id, {
           types: args.types,
           limit: args.limit,
           charsPerPart: args.chars_per_part,
+          order: args.order,
         })
         return {
           title: `${result.parts.length} parts from "${result.session.title ?? result.session.id}" in ${result.elapsedMs}ms`,
@@ -582,20 +621,45 @@ const plugin: Plugin = async (ctx) => ({
           .enum(["titles", "session", "global"])
           .optional()
           .describe('Search scope: "titles" (instant), "session" (ms), "global" (full scan, 10-30s)'),
-        limit: tool.schema.number().optional().describe("Max matches to return (default: 25, max: 200)"),
+        limit: tool.schema
+          .number()
+          .optional()
+          .describe("Max matches to return, or max sessions with group_by_session (default: 25, max: 200)"),
+        types: tool.schema
+          .array(tool.schema.enum(["text", "reasoning", "tool", "step-start"]))
+          .optional()
+          .describe('Only search parts of these types, e.g. ["text"] for the conversation alone (default: all)'),
+        since_days: tool.schema
+          .number()
+          .optional()
+          .describe("Only parts from the last N days (for titles: sessions updated in the last N days)"),
+        group_by_session: tool.schema
+          .boolean()
+          .optional()
+          .describe(
+            "Return one entry per session, ranked by match count, with its latest snippets, instead of individual " +
+              "matches. Best for finding which past session discussed something (default: false)",
+          ),
       },
       async execute(args) {
         const result = db.searchSessions(args.query, {
           sessionId: args.session_id,
           scope: args.scope,
           limit: args.limit,
+          types: args.types,
+          sinceDays: args.since_days,
+          groupBySession: args.group_by_session,
         })
+        const found = result.sessions
+          ? `${result.sessions.length} session(s)`
+          : `${result.matches.length} match(es)`
         return {
-          title: `${result.matches.length} match(es) in ${result.scope} scope in ${result.elapsedMs}ms`,
+          title: `${found} in ${result.scope} scope in ${result.elapsedMs}ms`,
           output: formatDbSearch(result),
           metadata: {
             scope: result.scope,
             matches: result.matches.length,
+            sessions: result.sessions?.length ?? null,
             truncated: result.truncated,
             elapsedMs: result.elapsedMs,
           },

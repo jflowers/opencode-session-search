@@ -34,6 +34,9 @@ export type DbSession = {
   tokensOutput: SqlValue
   timeCreated: number
   timeUpdated: number
+  slug: SqlValue
+  projectName: SqlValue
+  projectWorktree: SqlValue
 }
 
 export type SessionPart = {
@@ -50,6 +53,7 @@ export type SessionPart = {
 export type ReadSessionResult = {
   session: DbSession
   parts: SessionPart[]
+  order: "asc" | "desc"
   truncated: boolean
   elapsedMs: number
 }
@@ -73,7 +77,11 @@ export type SearchResult = {
   term: string
   /** The words that all had to match (a quoted phrase is one word). */
   words: string[]
+  /** Individual matches; when grouping, every session's snippets in session order. */
   matches: SearchMatch[]
+  /** One entry per session when the search was grouped; otherwise null. */
+  sessions: SessionHit[] | null
+  /** More matches (or sessions, when grouping) existed than the limit. */
   truncated: boolean
   elapsedMs: number
 }
@@ -266,17 +274,26 @@ export function query(sql: string, opts: { maxRows?: number; maxChars?: number }
 
 export function readSession(
   sessionId: string,
-  opts: { types?: PartType[]; limit?: number; charsPerPart?: number } = {},
+  opts: {
+    types?: PartType[]
+    limit?: number
+    charsPerPart?: number
+    /** "asc" (default): oldest first. "desc": newest first, so `limit` keeps the latest parts. */
+    order?: "asc" | "desc"
+  } = {},
 ): ReadSessionResult {
   const types = opts.types && opts.types.length > 0 ? opts.types : (["text", "reasoning"] as PartType[])
   const limit = clamp(opts.limit, 1, 500, 100)
   const chars = clamp(opts.charsPerPart, 1, 8000, 600)
+  const dir = opts.order === "desc" ? "DESC" : "ASC"
   const db = openDB()
   const started = performance.now()
   try {
     const session = db
       .prepare(
-        "SELECT id, title, directory, parent_id, agent, model, cost, tokens_input, tokens_output, time_created, time_updated FROM session WHERE id = ?",
+        "SELECT s.id, s.title, s.directory, s.parent_id, s.agent, s.model, s.cost, s.tokens_input, s.tokens_output, " +
+          "s.time_created, s.time_updated, s.slug, pr.name AS project_name, pr.worktree AS project_worktree " +
+          "FROM session s LEFT JOIN project pr ON pr.id = s.project_id WHERE s.id = ?",
       )
       .get(sessionId) as any
     if (!session) throw new Error(`session not found: ${sessionId}`)
@@ -293,7 +310,10 @@ export function readSession(
           `p.time_created AS part_time ` +
           `FROM message m JOIN part p ON p.message_id = m.id ` +
           `WHERE m.session_id = ? AND json_extract(p.data, '$.type') IN (${placeholders}) ` +
-          `ORDER BY m.time_created, m.id, p.time_created, p.id LIMIT ?`,
+          // Skip text and reasoning parts with nothing in them.
+          `AND NOT (json_extract(p.data, '$.type') IN ('text', 'reasoning') ` +
+          `AND length(trim(coalesce(json_extract(p.data, '$.text'), ''))) = 0) ` +
+          `ORDER BY m.time_created ${dir}, m.id ${dir}, p.time_created ${dir}, p.id ${dir} LIMIT ?`,
       )
       .all(chars, chars, sessionId, ...types, limit + 1) as any[]
     const truncated = rows.length > limit
@@ -320,8 +340,17 @@ export function readSession(
       tokensOutput: session.tokens_output ?? null,
       timeCreated: session.time_created,
       timeUpdated: session.time_updated,
+      slug: session.slug ?? null,
+      projectName: session.project_name ?? null,
+      projectWorktree: session.project_worktree ?? null,
     }
-    return { session: meta, parts, truncated, elapsedMs: Math.round(performance.now() - started) }
+    return {
+      session: meta,
+      parts,
+      order: dir === "DESC" ? "desc" : "asc",
+      truncated,
+      elapsedMs: Math.round(performance.now() - started),
+    }
   } finally {
     db.close()
   }
@@ -345,10 +374,34 @@ function likePattern(word: string): string {
   return `%${word.replace(/[\\%_]/g, (c) => `\\${c}`)}%`
 }
 
-export function searchSessions(
-  term: string,
-  opts: { sessionId?: string; scope?: SearchScope; limit?: number } = {},
-): SearchResult {
+/** One session in a grouped search: its match count and its latest matching snippets. */
+export type SessionHit = {
+  sessionId: string
+  title: SqlValue
+  directory: SqlValue
+  matchCount: number
+  lastMatch: number
+  snippets: SearchMatch[]
+}
+
+export type SearchOptions = {
+  sessionId?: string
+  scope?: SearchScope
+  /** Max matches, or max sessions when grouping. */
+  limit?: number
+  /** Only parts of these types (content scopes). Default: all types. */
+  types?: PartType[]
+  /** Only parts (or, for titles, sessions updated) in the last N days. */
+  sinceDays?: number
+  /** Return one entry per session, ranked by match count, instead of individual matches. */
+  groupBySession?: boolean
+  /** Snippets per session when grouping (default 2, max 10). */
+  snippetsPerSession?: number
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000
+
+export function searchSessions(term: string, opts: SearchOptions = {}): SearchResult {
   const needle = term.trim()
   const words = splitSearchTerms(needle)
   if (words.length === 0) throw new Error("query must be a non-empty search term")
@@ -357,17 +410,21 @@ export function searchSessions(
     throw new Error('scope "session" requires a session_id')
   }
   const limit = clamp(opts.limit, 1, 200, 25)
+  const since = opts.sinceDays !== undefined && opts.sinceDays > 0 ? Date.now() - opts.sinceDays * DAY_MS : null
   const patterns = words.map(likePattern)
   const allLike = (column: string) => words.map(() => `${column} LIKE ? ESCAPE '\\'`).join(" AND ")
+  const elapsed = (started: number) => Math.round(performance.now() - started)
   const db = openDB()
   const started = performance.now()
   try {
     if (scope === "titles") {
+      const sinceSql = since === null ? "" : "AND time_updated >= ? "
       const rows = db
         .prepare(
-          `SELECT id, title, directory, agent, time_created FROM session WHERE ${allLike("title")} ORDER BY time_updated DESC LIMIT ?`,
+          `SELECT id, title, directory, agent, time_created FROM session WHERE ${allLike("title")} ${sinceSql}` +
+            `ORDER BY time_updated DESC LIMIT ?`,
         )
-        .all(...patterns, limit + 1) as any[]
+        .all(...patterns, ...(since === null ? [] : [since]), limit + 1) as any[]
       const truncated = rows.length > limit
       if (truncated) rows.pop()
       const matches: SearchMatch[] = rows.map((r) => ({
@@ -381,11 +438,28 @@ export function searchSessions(
         type: null,
         snippet: null,
       }))
-      return { scope, term: needle, words, matches, truncated, elapsedMs: Math.round(performance.now() - started) }
+      return { scope, term: needle, words, matches, sessions: null, truncated, elapsedMs: elapsed(started) }
     }
-    const order = scope === "session" ? "ASC" : "DESC"
-    const sessionFilter = scope === "session" ? "AND p.session_id = ? " : ""
-    const sql =
+
+    // Shared WHERE clause for the content scopes.
+    const where: string[] = [allLike("p.data")]
+    const whereParams: unknown[] = [...patterns]
+    if (scope === "session") {
+      where.push("p.session_id = ?")
+      whereParams.push(opts.sessionId)
+    }
+    if (opts.types && opts.types.length > 0) {
+      where.push(`json_extract(p.data, '$.type') IN (${opts.types.map(() => "?").join(", ")})`)
+      whereParams.push(...opts.types)
+    }
+    if (since !== null) {
+      where.push("p.time_created >= ?")
+      whereParams.push(since)
+    }
+    const whereSql = where.join(" AND ")
+
+    // The snippet is centred on the first word.
+    const matchSql = (order: "ASC" | "DESC", extra = "") =>
       `SELECT p.session_id, s.title, s.directory, p.message_id, ` +
       `json_extract(m.data, '$.role') AS role, ` +
       `json_extract(p.data, '$.type') AS type, ` +
@@ -394,17 +468,9 @@ export function searchSessions(
       `FROM part p ` +
       `JOIN message m ON m.id = p.message_id ` +
       `JOIN session s ON s.id = p.session_id ` +
-      `WHERE ${allLike("p.data")} ${sessionFilter}` +
+      `WHERE ${whereSql}${extra} ` +
       `ORDER BY p.time_created ${order} LIMIT ?`
-    // The snippet is centred on the first word.
-    const params: unknown[] =
-      scope === "session"
-        ? [words[0], ...patterns, opts.sessionId, limit + 1]
-        : [words[0], ...patterns, limit + 1]
-    const rows = db.prepare(sql).all(...(params as any[])) as any[]
-    const truncated = rows.length > limit
-    if (truncated) rows.pop()
-    const matches: SearchMatch[] = rows.map((r) => ({
+    const toMatch = (r: any): SearchMatch => ({
       sessionId: r.session_id,
       title: r.title ?? null,
       directory: r.directory ?? null,
@@ -414,8 +480,42 @@ export function searchSessions(
       role: r.role ?? null,
       type: r.type ?? null,
       snippet: r.snippet ?? null,
-    }))
-    return { scope, term: needle, words, matches, truncated, elapsedMs: Math.round(performance.now() - started) }
+    })
+
+    if (opts.groupBySession) {
+      const perSession = clamp(opts.snippetsPerSession, 1, 10, 2)
+      const groups = db
+        .prepare(
+          `SELECT p.session_id, s.title, s.directory, COUNT(*) AS match_count, MAX(p.time_created) AS last_match ` +
+            `FROM part p JOIN session s ON s.id = p.session_id ` +
+            `WHERE ${whereSql} ` +
+            `GROUP BY p.session_id ORDER BY match_count DESC, last_match DESC LIMIT ?`,
+        )
+        .all(...(whereParams as any[]), limit + 1) as any[]
+      const truncated = groups.length > limit
+      if (truncated) groups.pop()
+      // Latest snippets per session: indexed by part(session_id), so milliseconds each.
+      const snippetStmt = db.prepare(matchSql("DESC", " AND p.session_id = ?"))
+      const sessions: SessionHit[] = groups.map((g) => ({
+        sessionId: g.session_id,
+        title: g.title ?? null,
+        directory: g.directory ?? null,
+        matchCount: Number(g.match_count),
+        lastMatch: Number(g.last_match),
+        snippets: (snippetStmt.all(words[0], ...(whereParams as any[]), g.session_id, perSession) as any[]).map(
+          toMatch,
+        ),
+      }))
+      const matches = sessions.flatMap((h) => h.snippets)
+      return { scope, term: needle, words, matches, sessions, truncated, elapsedMs: elapsed(started) }
+    }
+
+    const order = scope === "session" ? "ASC" : "DESC"
+    const rows = db.prepare(matchSql(order)).all(words[0], ...(whereParams as any[]), limit + 1) as any[]
+    const truncated = rows.length > limit
+    if (truncated) rows.pop()
+    const matches = rows.map(toMatch)
+    return { scope, term: needle, words, matches, sessions: null, truncated, elapsedMs: elapsed(started) }
   } finally {
     db.close()
   }

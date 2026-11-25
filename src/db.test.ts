@@ -230,3 +230,100 @@ describe("searchSessions all-words matching", () => {
     expect(() => searchSessions('""')).toThrow(/non-empty/)
   })
 })
+
+describe("searchSessions grouping and filters", () => {
+  const sessionWithText = () =>
+    // A recent session with more than 3 text parts. Only the 50 newest sessions are checked, and each
+    // check stops after 4 parts on the part(session_id) index, so this takes milliseconds.
+    query(
+      "SELECT s.id FROM (SELECT id, time_updated FROM session ORDER BY time_updated DESC LIMIT 50) s " +
+        "WHERE (SELECT count(*) FROM (SELECT 1 FROM part p WHERE p.session_id = s.id " +
+        "AND json_extract(p.data, '$.type') = 'text' LIMIT 4)) > 3 ORDER BY s.time_updated DESC LIMIT 1",
+    ).rows[0]?.id as string | undefined
+
+  test.skipIf(!dbExists)("group_by_session returns one entry per session with counts and capped snippets", () => {
+    const sessionId = sessionWithText()
+    if (!sessionId) return
+    const result = searchSessions("e", { scope: "session", sessionId, groupBySession: true, snippetsPerSession: 2 })
+    expect(result.sessions).not.toBeNull()
+    expect(result.sessions!.length).toBe(1)
+    const hit = result.sessions![0]
+    expect(hit.sessionId).toBe(sessionId)
+    expect(hit.matchCount).toBeGreaterThan(0)
+    expect(hit.snippets.length).toBeLessThanOrEqual(2)
+    expect(hit.snippets.length).toBeLessThanOrEqual(hit.matchCount)
+    for (const m of hit.snippets) expect(m.timeCreated).toBeLessThanOrEqual(hit.lastMatch)
+    // Snippets are the latest matches, newest first.
+    const times = hit.snippets.map((m) => m.timeCreated)
+    expect([...times].sort((a, b) => b - a)).toEqual(times)
+  })
+
+  test.skipIf(!dbExists)("ungrouped searches report sessions as null", () => {
+    const sessionId = sessionWithText()
+    if (!sessionId) return
+    expect(searchSessions("e", { scope: "session", sessionId }).sessions).toBeNull()
+  })
+
+  test.skipIf(!dbExists)("types limits matches to those part types", () => {
+    const sessionId = sessionWithText()
+    if (!sessionId) return
+    const result = searchSessions("e", { scope: "session", sessionId, types: ["text"], limit: 50 })
+    expect(result.matches.length).toBeGreaterThan(0)
+    for (const m of result.matches) expect(m.type).toBe("text")
+  })
+
+  test.skipIf(!dbExists)("since_days drops older matches", () => {
+    const sessionId = sessionWithText()
+    if (!sessionId) return
+    const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000
+    const result = searchSessions("e", { scope: "session", sessionId, sinceDays: 30, limit: 200 })
+    for (const m of result.matches) expect(m.timeCreated).toBeGreaterThanOrEqual(cutoff)
+    const titles = searchSessions("e", { scope: "titles", sinceDays: 1, limit: 200 })
+    const recent = query(
+      `SELECT count(*) AS n FROM session WHERE title LIKE '%e%' AND time_updated >= ${Date.now() - 24 * 60 * 60 * 1000}`,
+    ).rows[0].n as number
+    expect(titles.matches.length).toBe(Math.min(recent, 200))
+  })
+})
+
+describe("readSession order, project details and empty parts", () => {
+  const busySession = () =>
+    // A recent session with more than 5 text parts. Only the 50 newest sessions are checked, and each
+    // check stops after 6 parts on the part(session_id) index, so this takes milliseconds.
+    query(
+      "SELECT s.id FROM (SELECT id, time_updated FROM session ORDER BY time_updated DESC LIMIT 50) s " +
+        "WHERE (SELECT count(*) FROM (SELECT 1 FROM part p WHERE p.session_id = s.id " +
+        "AND json_extract(p.data, '$.type') = 'text' LIMIT 6)) > 5 ORDER BY s.time_updated DESC LIMIT 1",
+    ).rows[0]?.id as string | undefined
+
+  test.skipIf(!dbExists)('order "desc" returns the newest parts first', () => {
+    const id = busySession()
+    if (!id) return
+    const asc = readSession(id, { types: ["text"], limit: 500 })
+    const desc = readSession(id, { types: ["text"], limit: 3, order: "desc" })
+    expect(desc.order).toBe("desc")
+    expect(desc.parts.length).toBe(Math.min(3, asc.parts.length))
+    const times = desc.parts.map((p) => p.timeCreated)
+    expect([...times].sort((a, b) => b - a)).toEqual(times)
+    expect(desc.parts[0].timeCreated).toBe(asc.parts[asc.parts.length - 1].timeCreated)
+  })
+
+  test.skipIf(!dbExists)("includes slug and project details", () => {
+    const id = busySession()
+    if (!id) return
+    const expected = query(
+      `SELECT s.slug, pr.name, pr.worktree FROM session s LEFT JOIN project pr ON pr.id = s.project_id WHERE s.id = '${id}'`,
+    ).rows[0]
+    const { session } = readSession(id, { limit: 1 })
+    expect(session.slug).toBe(expected.slug)
+    expect(session.projectName).toBe(expected.name)
+    expect(session.projectWorktree).toBe(expected.worktree)
+  })
+
+  test.skipIf(!dbExists)("skips text and reasoning parts with no text", () => {
+    const id = busySession()
+    if (!id) return
+    const { parts } = readSession(id, { types: ["text", "reasoning"], limit: 500 })
+    for (const p of parts) expect(String(p.text ?? "").trim().length).toBeGreaterThan(0)
+  })
+})
