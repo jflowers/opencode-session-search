@@ -19,10 +19,10 @@ Everything here is **read-only**. WAL readers never block the live writer, so qu
 
 | Need | Use |
 |---|---|
-| Read a session's conversation | `db_read_session(session_id)` — ms, any session size |
+| Read a session's conversation | `db_read_session(session_id)` — ms, any session size; `order="desc"` for the latest parts |
 | Find sessions by title | `db_search(query, scope="titles")` — instant |
 | Search inside one session | `db_search(query, session_id, scope="session")` — ms |
-| Search everything | `db_search(query, scope="global")` — full scan, 10–30 s |
+| Search everything | `db_search(query, scope="global", group_by_session=true)` — full scan, 10–30 s |
 | Anything structured (counts, joins, rollups, tool history, todos) | `db_query(sql)` |
 | Pipe output through jq/rg, or db_* tools unavailable | raw `sqlite3` (below) |
 
@@ -36,6 +36,14 @@ Queries match **all words**: `db_search("auth login")` finds parts (or titles) c
 2. Narrow by project/directory/date via `db_query` (indexed, ms).
 3. `db_search(query, session_id=..., scope="session")` — ms.
 4. `db_search(query, scope="global")` — last resort, 10–30 s budget. Only when the term could be anywhere and narrower scopes failed.
+
+Options that make content searches cheaper and less noisy:
+
+- `group_by_session=true` — one entry per session, ranked by match count, with its 2 latest snippets. Use it to answer "which session discussed X?"; `limit` then caps sessions, not matches.
+- `types=["text"]` — the conversation only. Searching every type also matches tool output and the JSON keys of tool parts, which is often noise.
+- `since_days=N` — only parts from the last N days (for titles: sessions updated in the last N days).
+
+To see how a long session ended, use `db_read_session(session_id, order="desc", limit=20)`: newest parts first, so `limit` keeps the latest ones.
 
 ## Raw sqlite3 escape hatch
 
