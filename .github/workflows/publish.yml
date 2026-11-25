@@ -4,9 +4,10 @@ name: Publish
 #   gh workflow run publish.yml -f tag=v0.2.0
 # The pipeline is jflowers/ship's shared npm-release.yml: org-infra's
 # preflight (semver, tag uniqueness, CI on HEAD, unreleased commits) creates
-# the tag, then the tag is checked out, package.json's version must equal
-# it, the checks below run, the package is published with provenance (a
-# personal-account package isn't staged), and the GitHub release is created
+# the tag, then the tag is checked out, the version is set from the tag
+# (main holds 0.0.0-development in package.json), the checks below run,
+# the package is published with provenance (a personal-account package
+# isn't staged), and the GitHub release is created
 # with generated notes. A version already on npm is skipped, so a re-run is
 # safe.
 #
@@ -18,7 +19,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag; package.json's version must match (e.g. v0.2.0)
+        description: Release tag; it sets the version (e.g. v0.2.0)
         required: true
         type: string
 
@@ -31,7 +32,7 @@ concurrency:
 jobs:
   release:
     name: Release
-    uses: jflowers/ship/.github/workflows/npm-release.yml@bcd5ebc6d1f5ebe209f6701741acea9b6e8bb008 # v0.5.0
+    uses: jflowers/ship/.github/workflows/npm-release.yml@45412e4cca927cbc422e3c4da9d1b12cb0c7329d # v0.6.0
     with:
       tag: ${{ inputs.tag }}
       ci_checks: '["typecheck and test"]'
